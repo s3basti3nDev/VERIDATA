@@ -291,8 +291,22 @@ statistiquement** — à mentionner explicitement dans toute présentation.
 ### Semaine 2 — Perturbations (K=1)
 - Voir tableau ci-dessus
 
-### Semaine 3 — Invariants
-- À remplir après les runs vérifiés (SER_avec, coverage, sur_abstention, FPR)
+### Semaine 3 — Invariants (K=3, n=30 questions number, severity=0.3)
+
+| Mode | SER_sans | SER_avec | Coverage | FPR clean |
+|---|---|---|---|---|
+| row_duplication | 50.0 % | **6.7 % [2.8, 14.1]** | 35.6 % | 16.7 % |
+| locale_format | 24.4 % | **12.2 % [6.8, 20.7]** | 56.7 % | 16.7 % |
+| outlier_injection | 18.3 % | **18.3 %** (inchangé) | 83.3 % | 16.7 % |
+
+Tableau de discrimination par invariant :
+
+| Invariant | Mode cible | Δ fire_rate [IC Wilson 95 %] | Abstient |
+|---|---|---|---|
+| `duplicate_rows` | row_duplication | **+0.807 [0.636, 0.890]** | ✓ |
+| `dtype_mismatch` | locale_format | +0.233 [0.047, 0.401] (marginal) | ✓ |
+| `numeric_outliers` | outlier_injection | -0.048 [-0.248, 0.166] (IC∋0) | ✗ trace |
+| `unexplained_constant` | hallucination | +0.000 (jamais déclenché) | ✓ |
 
 ---
 
@@ -307,6 +321,8 @@ statistiquement** — à mentionner explicitement dans toute présentation.
 | Seuil IQR | k=5 (strict) | k=3 (trop de faux positifs sur données réelles) |
 | Stockage tables | Parquet (pyarrow présent) | Pickle (non-portable) |
 | expected_sensitive | Calculé selon la question | Dans les fonctions de perturbation |
+| σ vs IC Wilson | Deux incertitudes distinctes : σ_K = bruit modèle, Wilson = robustesse éch. | Un seul IC ambigu |
+| Integrity check | git log invariants.py vs ts du run → refuse si modifié après | Recomputation silencieuse |
 
 ---
 
@@ -325,13 +341,19 @@ scripts/
   run_perturbed.py    # run sans invariants (--clean ou perturbé)
   run_verified.py     # run avec invariants (--clean pour FPR)
   show_trace.py           # affiche trace auditable pour une question
-  analyze_invariants.py   # tableau de discrimination par invariant (headline)
+  analyze_invariants.py   # tableau de discrimination par invariant
+  repeat_runs.py          # agrégation K runs + integrity check + σ vs Wilson CI
+  make_figures.py         # Fig 1/2/3 PNG → report/figures/
 configs/
   baseline.toml       # inclut section [invariants]
 runs/                 # JSONL par run (gitignored)
   perturbed/          # manifests + Parquet (gitignored)
+  agg_row_duplication_k3.json   # résultats agrégés K=3 (gitignored)
+report/
+  RAPPORT.md          # rapport final (chiffres réels)
+  figures/            # Fig 1/2/3 PNG
 tests/
-  test_pipeline.py    # 79 tests mockés + 1 skipped (live)
+  test_pipeline.py    # 89 tests mockés + 1 skipped (live)
 ```
 
 ---
@@ -351,11 +373,18 @@ tests/
 - **Politique d'abstention révisée** : `numeric_outliers` trace-only (delta≈0 sur DataBench)
 - Limite documentée : classe "sémantique plausible + grounded" non couverte
 
-### ⬜ Semaine 4 — Rapport final
-- Runs vérifiés sur les 3 modes + tableau de discrimination par invariant
-- Visualisations : SER sans vs avec, courbe coverage vs SER
-- Benchmark multi-modèles si budget
-- Rapport final
+### ✅ Semaine 4 — Rapport final
+- `repeat_runs.py` : agrégation K runs, integrity check (git invariants.py), distinctness check,
+  σ_K (bruit modèle) séparé de l'IC Wilson (robustesse statistique)
+- `make_figures.py` : Fig 1 (discrimination), Fig 2 (SER), Fig 3 (K=3 ± σ)
+- `report/RAPPORT.md` : rapport complet, chiffres réels, figures référencées
+- **Chiffre phare stabilisé K=3** : `duplicate_rows` Δ = **+0.807 ± 0.030** [IC Wilson : 0.636, 0.890]
+- σ ≈ 0 confirme quasi-déterminisme du modèle à T=0 (27/30 codes identiques)
+- K=2 outlier_injection : pas de σ (non significatif)
+- 89 tests mockés + 1 skipped (live)
+
+**Loi dégagée** : un invariant discrimine ⟺ sa signature de déclenchement est
+structurellement distincte de la variation naturelle des données réelles.
 
 ---
 

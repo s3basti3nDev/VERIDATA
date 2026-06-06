@@ -597,6 +597,168 @@ class TestVerifier:
 
 
 # ---------------------------------------------------------------------------
+# repeat_runs.py unit tests (no API calls, no subprocess)
+# ---------------------------------------------------------------------------
+
+class TestRepeatRuns:
+    """Tests for the aggregation logic in scripts/repeat_runs.py."""
+
+    def _make_record(
+        self,
+        question_idx: int = 0,
+        correct: bool = True,
+        abstained: bool = False,
+        expected_sensitive: bool = True,
+        generated_code: str = "result = df['v'].sum()",
+        dup_fired: bool = False,
+        outlier_fired: bool = False,
+        dtype_fired: bool = False,
+        ts: str = "2026-06-06T17:40:00+00:00",
+    ) -> dict:
+        return {
+            "question_idx": question_idx,
+            "correct": correct,
+            "abstained": abstained,
+            "expected_sensitive": expected_sensitive,
+            "generated_code": generated_code,
+            "perturbation": "row_duplication",
+            "ts": ts,
+            "invariants": [
+                {"name": "duplicate_rows",       "fired": dup_fired,     "severity": 0.6 if dup_fired else 0.0, "detail": ""},
+                {"name": "numeric_outliers",      "fired": outlier_fired, "severity": 0.8 if outlier_fired else 0.0, "detail": ""},
+                {"name": "dtype_mismatch",        "fired": dtype_fired,   "severity": 0.9 if dtype_fired else 0.0, "detail": ""},
+                {"name": "unexplained_constant",  "fired": False,         "severity": 0.0, "detail": ""},
+            ],
+        }
+
+    def _make_run(self, n: int = 30, wrong_fraction: float = 0.7, dup_fraction: float = 0.8) -> list[dict]:
+        records = []
+        for i in range(n):
+            wrong = (i / n) < wrong_fraction
+            fired = (i / n) < dup_fraction
+            records.append(self._make_record(
+                question_idx=i,
+                correct=not wrong,
+                abstained=fired,
+                dup_fired=fired,
+                generated_code=f"result = df['v'].sum()  # q{i}",
+            ))
+        return records
+
+    def _make_clean_run(self, n: int = 30) -> list[dict]:
+        return [
+            self._make_record(
+                question_idx=i,
+                correct=True,
+                abstained=False,
+                generated_code=f"result = df['v'].sum()  # q{i}",
+            )
+            for i in range(n)
+        ]
+
+    def test_wilson_ci_midpoint(self):
+        """Wilson CI midpoint should be close to k/n for large n."""
+        from scripts.repeat_runs import wilson_ci
+        lo, hi = wilson_ci(50, 100)
+        assert lo < 0.5 < hi
+        assert abs((lo + hi) / 2 - 0.5) < 0.02
+
+    def test_wilson_ci_zero_events(self):
+        """Wilson CI with k=0 should have lower bound 0."""
+        from scripts.repeat_runs import wilson_ci
+        lo, hi = wilson_ci(0, 30)
+        assert lo == pytest.approx(0.0, abs=0.01)
+        assert hi > 0.0
+
+    def test_wilson_ci_all_events(self):
+        """Wilson CI with k=n should have upper bound 1."""
+        from scripts.repeat_runs import wilson_ci
+        lo, hi = wilson_ci(30, 30)
+        assert hi == pytest.approx(1.0, abs=0.01)
+        assert lo < 1.0
+
+    def test_recompute_record_strips_outlier_from_abstain(self):
+        """numeric_outliers fired alone must NOT set abstained=True (trace-only)."""
+        from scripts.repeat_runs import recompute_record
+        rec = self._make_record(outlier_fired=True, abstained=True)
+        result = recompute_record(rec)
+        assert result["abstained"] is False
+        assert result["confidence"] == pytest.approx(1.0)
+
+    def test_recompute_record_dup_rows_triggers_abstain(self):
+        """duplicate_rows fired must set abstained=True."""
+        from scripts.repeat_runs import recompute_record
+        rec = self._make_record(dup_fired=True, abstained=False)
+        result = recompute_record(rec)
+        assert result["abstained"] is True
+        assert result["confidence"] < 1.0
+
+    def test_analyze_pair_ser_metrics(self):
+        """SER_sans and SER_avec computed correctly from a known run pair."""
+        from scripts.repeat_runs import analyze_pair
+        # 10 questions: 7 wrong, 5 abstained (dup_fired on first 5)
+        perturbed = [
+            self._make_record(
+                question_idx=i,
+                correct=(i >= 7),
+                dup_fired=(i < 5),
+                expected_sensitive=True,
+            )
+            for i in range(10)
+        ]
+        clean = [self._make_record(question_idx=i, correct=True) for i in range(10)]
+        result = analyze_pair(perturbed, clean)
+        ser = result["_ser"]
+        assert ser["ser_sans"] == pytest.approx(0.7)        # 7/10 wrong
+        # 5 are abstained, of those 5: all 5 are wrong → 2 remaining wrong are silent
+        assert ser["ser_avec"] == pytest.approx(0.2)        # 2/10 silent errors
+        assert ser["coverage"] == pytest.approx(0.5)        # 1 - 5/10
+
+    def test_aggregate_mean_and_sigma(self):
+        """Mean and σ computed correctly from 3 fabricated run analyses."""
+        from scripts.repeat_runs import analyze_pair, aggregate
+        # Three runs with known different fire rates (0.8, 0.7, 0.6)
+        runs = []
+        for frac in [0.8, 0.7, 0.6]:
+            pert = self._make_run(n=10, wrong_fraction=frac, dup_fraction=frac)
+            clean = self._make_clean_run(n=10)
+            runs.append(analyze_pair(pert, clean))
+        result = aggregate(runs)
+        dr = result["duplicate_rows"]
+        fire_m, fire_s = dr["fire_rate_perturbed"]
+        assert fire_m == pytest.approx(0.7, abs=0.01)    # mean of 0.8, 0.7, 0.6
+        assert fire_s == pytest.approx(0.1, abs=0.01)    # std of 0.8, 0.7, 0.6
+
+    def test_aggregate_k_recorded(self):
+        """Aggregate result records the K value."""
+        from scripts.repeat_runs import analyze_pair, aggregate
+        runs = [
+            analyze_pair(
+                self._make_run(n=10),
+                self._make_clean_run(n=10),
+            )
+        ] * 2
+        result = aggregate(runs)
+        assert result["k"] == 2
+
+    def test_distinctness_warns_on_identical_code(self):
+        """check_distinctness warns when all codes are identical."""
+        from scripts.repeat_runs import check_distinctness
+        run_a = [self._make_record(question_idx=i, generated_code="result = 42") for i in range(10)]
+        run_b = [self._make_record(question_idx=i, generated_code="result = 42") for i in range(10)]
+        warnings = check_distinctness([run_a, run_b])
+        assert any("σ may NOT" in w for w in warnings)
+
+    def test_distinctness_ok_on_different_code(self):
+        """check_distinctness is silent when codes differ across runs."""
+        from scripts.repeat_runs import check_distinctness
+        run_a = [self._make_record(question_idx=i, generated_code=f"result = {i}") for i in range(10)]
+        run_b = [self._make_record(question_idx=i, generated_code=f"result = {i+100}") for i in range(10)]
+        warnings = check_distinctness([run_a, run_b])
+        assert not any("σ may NOT" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
 # Live integration tests — requires VERIDATA_LIVE_TESTS=1 + ANTHROPIC_API_KEY
 # ---------------------------------------------------------------------------
 
