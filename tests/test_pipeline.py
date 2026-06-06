@@ -14,7 +14,12 @@ import pytest
 
 from veridata.agent import AgentResult, DataAnalysisAgent
 from veridata.config import load_config
-from veridata.evaluator import _compare_list_category, _compare_number, normalized_compare
+from veridata.evaluator import (
+    BaselineEvaluator,
+    _compare_list_category,
+    _compare_number,
+    normalized_compare,
+)
 from veridata.executor import execute_code
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "baseline.toml"
@@ -183,6 +188,31 @@ class TestNormalizedCompare:
     def test_unknown_semantic_falls_back_to_str(self):
         assert normalized_compare("hello", "hello", "list[number]") is True
         assert normalized_compare("hello", "world", "list[number]") is False
+
+    # --- score() alignment test ---
+    def test_score_three_correct_one_wrong(self):
+        """Core alignment test: score() must return 0.75 for 3/4 correct pairs.
+
+        This test would have caught the Evaluator.eval() alignment bug
+        (which produced 0.0022 instead of ~0.82) immediately.
+        """
+        sample = [
+            {"answer": "42",            "type": "number"},        # ✓ float vs int
+            {"answer": "Paris",         "type": "category"},      # ✓ case-insensitive
+            {"answer": "apple, banana", "type": "list[category]"},# ✓ order-insensitive
+            {"answer": "100",           "type": "number"},        # ✗ 1 % off
+        ]
+        responses = ["42.0", "paris", "banana, apple", "101"]
+
+        evaluator = BaselineEvaluator.__new__(BaselineEvaluator)  # skip __init__ / HF download
+        acc = evaluator.score(responses, sample)
+        assert acc == pytest.approx(0.75)
+
+    def test_score_raises_on_alignment_mismatch(self):
+        """score() must refuse mismatched lengths — alignment guard."""
+        evaluator = BaselineEvaluator.__new__(BaselineEvaluator)
+        with pytest.raises(ValueError, match="Alignment mismatch"):
+            evaluator.score(["a", "b"], [{"answer": "a", "type": "category"}])
 
 
 # ---------------------------------------------------------------------------

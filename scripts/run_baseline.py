@@ -24,7 +24,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from veridata.agent import DataAnalysisAgent
 from veridata.config import load_config
-from veridata.evaluator import BaselineEvaluator
+from veridata.evaluator import BaselineEvaluator, normalized_compare
 from veridata.logger import ResultsWriter, setup_logger
 
 _CONFIG_PATH = _PROJECT_ROOT / "configs" / "baseline.toml"
@@ -77,6 +77,14 @@ def main() -> None:
         table_df = evaluator.load_table_for(row)
         result = agent.answer(question=row["question"], df=table_df)
 
+        # Compute verdict here — same comparator as score(), so JSONL is
+        # always consistent with the final accuracy figure.
+        correct = normalized_compare(
+            result.answer,
+            str(row.get("answer", "")),
+            str(row.get("type", "")),
+        )
+
         # JSONL schema — includes Week-2 reserved fields at None.
         record: dict = {
             "run_id": run_id,
@@ -86,8 +94,9 @@ def main() -> None:
             "question": row["question"],
             "dataset": row["dataset"],
             "answer_type": row.get("type"),
-            "ground_truth": row.get("answer"),   # from QA row (may be None on blind splits)
+            "ground_truth": row.get("answer"),
             "answer": result.answer,
+            "correct": correct,                  # auditable per-record verdict
             "generated_code": result.generated_code,
             "confidence": result.confidence,     # None — reserved for SER (Week 2)
             "abstained": result.abstained,       # None — reserved for SER (Week 2)
@@ -100,7 +109,7 @@ def main() -> None:
             f"[{idx}/{sample_size}] {row['question'][:70]!r} → {result.answer!r}"
         )
 
-    accuracy = evaluator.score(responses)
+    accuracy = evaluator.score(responses, sample)
     log.info(
         f"Run complete | accuracy={accuracy:.4f} mode={run_mode} n={sample_size} "
         f"run_id={run_id}"
