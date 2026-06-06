@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "PowerShell(uv --version 2>$null)",
+      "PowerShell(if \\(-not $?\\) { \"uv not found in PowerShell either\" })",
+      "Bash(pip --version)",
+      "Bash(pip show *)"
+    ]
+  }
+}

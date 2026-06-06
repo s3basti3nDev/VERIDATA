@@ -1,0 +1,21 @@
+# VERIDATA — baseline run configuration
+# All model identifiers are pinned exactly for reproducibility.
+# To rerun with identical conditions, keep this file unchanged.
+
+[model]
+model_id    = "claude-haiku-4-5-20251001"
+temperature = 0.0     # deterministic outputs; logged in every run record
+max_tokens  = 1024
+
+[dataset]
+name        = "semeval"   # databench-eval dataset name
+split       = "dev"       # evaluation split
+sample_size = 50          # full baseline run
+smoke_size  = 10          # --smoke flag: pipeline validation, low cost
+
+[execution]
+timeout_seconds = 30       # per-question code execution ceiling
+max_rows        = 50_000   # rows fed to exec(); larger tables are truncated
+
+[paths]
+runs_dir = "runs"   # relative to project root; holds per-run .jsonl files
