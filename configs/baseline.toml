@@ -3,7 +3,7 @@
 # To rerun with identical conditions, keep this file unchanged.
 
 [model]
-model_id    = "claude-haiku-4-5-20251001"
+model_id    = "claude-sonnet-4-6"
 temperature = 0.0     # deterministic outputs; logged in every run record
 max_tokens  = 1024
 

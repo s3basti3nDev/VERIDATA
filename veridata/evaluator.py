@@ -28,7 +28,10 @@ class BaselineEvaluator:
     def load_sample(self, n: int) -> list[dict]:
         """Return the first ``n`` QA entries in dataset order (deterministic)."""
         if self._qa is None:
-            self._qa = load_qa(name=self._name, split=self._split)
+            raw = load_qa(name=self._name, split=self._split)
+            # load_qa may return a HuggingFace Dataset; normalise to list[dict]
+            # so that row["dataset"] works regardless of the underlying type.
+            self._qa = list(raw) if not isinstance(raw, list) else raw
         return self._qa[:n]
 
     def load_table_for(self, row: dict) -> pd.DataFrame:
