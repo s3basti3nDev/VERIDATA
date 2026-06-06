@@ -22,6 +22,13 @@ from veridata.evaluator import (
     normalized_compare,
 )
 from veridata.executor import execute_code
+from veridata.invariants import (
+    InvariantResult,
+    duplicate_rows,
+    dtype_mismatch,
+    numeric_outliers,
+    unexplained_constant,
+)
 from veridata.metrics import compare, compute
 from veridata.perturbations import (
     expected_sensitive,
@@ -29,6 +36,7 @@ from veridata.perturbations import (
     outlier_injection,
     row_duplication,
 )
+from veridata.verifier import VerificationResult, run_invariants
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "baseline.toml"
 
@@ -417,6 +425,164 @@ class TestPerturbations:
 
     def test_expected_sensitive_outlier_mean_is_true(self):
         assert expected_sensitive("What is the average salary?", "outlier_injection") is True
+
+
+# ---------------------------------------------------------------------------
+# Invariant unit tests — no LLM, no network
+# ---------------------------------------------------------------------------
+
+class TestInvariants:
+    # --- duplicate_rows ---
+
+    def test_duplicate_rows_fires_when_many_dupes_and_sensitive_agg(self):
+        df = pd.DataFrame({"v": [1, 2, 3] * 10})   # 20/30 rows duplicated → > 0.05
+        r = duplicate_rows(df, "result = df['v'].sum()", "60", "What is the total?")
+        assert r.fired is True
+        assert r.severity > 0
+
+    def test_duplicate_rows_no_fire_when_no_sensitive_agg(self):
+        df = pd.DataFrame({"v": [1, 2, 3] * 10})
+        r = duplicate_rows(df, "result = df['v'].max()", "3", "What is the max?")
+        assert r.fired is False
+
+    def test_duplicate_rows_no_fire_on_clean_data(self):
+        df = pd.DataFrame({"v": range(100)})   # all unique
+        r = duplicate_rows(df, "result = df['v'].sum()", "4950", "Total?")
+        assert r.fired is False
+
+    # --- numeric_outliers ---
+
+    def test_numeric_outliers_fires_on_extreme_values(self):
+        values = list(range(20)) + [10_000]   # one extreme outlier
+        df = pd.DataFrame({"score": values})
+        r = numeric_outliers(df, "result = df['score'].mean()", "499", "Mean?", k=3.0)
+        assert r.fired is True
+        assert "score" in r.detail
+
+    def test_numeric_outliers_no_fire_on_normal_distribution(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"v": rng.normal(100, 10, 200)})
+        r = numeric_outliers(df, "result = df['v'].mean()", "100", "Mean?", k=5.0)
+        assert r.fired is False
+
+    def test_numeric_outliers_widens_scope_on_dynamic_subscript(self):
+        values = list(range(20)) + [50_000]
+        df = pd.DataFrame({"score": values})
+        code = "col = 'score'\nresult = df[col].mean()"   # dynamic subscript
+        r = numeric_outliers(df, code, "2500", "Mean?", k=3.0)
+        # Widen to all_columns — should still fire on the outlier
+        assert "scope=all_columns" in r.detail
+
+    # --- dtype_mismatch ---
+
+    def test_dtype_mismatch_fires_on_object_column_with_agg(self):
+        df = pd.DataFrame({"price": ["1 234,56", "7 890,12"]})   # FR locale strings
+        r = dtype_mismatch(df, "result = df['price'].sum()", "0", "Total price?")
+        assert r.fired is True
+        assert "price" in r.detail
+
+    def test_dtype_mismatch_no_fire_on_numeric_column(self):
+        df = pd.DataFrame({"price": [1234.56, 7890.12]})
+        r = dtype_mismatch(df, "result = df['price'].sum()", "9124.68", "Total?")
+        assert r.fired is False
+
+    def test_dtype_mismatch_no_fire_without_aggregation(self):
+        df = pd.DataFrame({"name": ["Alice", "Bob"], "score": [90, 80]})
+        r = dtype_mismatch(df, "result = df['name'].iloc[0]", "Alice", "First name?")
+        assert r.fired is False
+
+    # --- unexplained_constant ---
+
+    def test_unexplained_constant_fires_on_hardcoded_float(self):
+        df = pd.DataFrame({"revenue": [100.0, 200.0, 300.0]})
+        code = "result = df['revenue'].sum() * 0.91"   # 0.91 not in data or question
+        r = unexplained_constant(df, code, "545.9", "What is the adjusted revenue?")
+        assert r.fired is True
+        assert "0.91" in r.detail
+
+    def test_unexplained_constant_no_fire_on_column_only_code(self):
+        df = pd.DataFrame({"revenue": [100.0, 200.0, 300.0]})
+        code = "result = df['revenue'].sum()"
+        r = unexplained_constant(df, code, "600.0", "What is the total revenue?")
+        assert r.fired is False
+
+    def test_unexplained_constant_no_fire_on_comparison_threshold(self):
+        df = pd.DataFrame({"rate": [0.1, 0.5, 0.9]})
+        code = "result = (df['rate'] > 0.75).sum()"   # 0.75 is in a Compare → excluded
+        r = unexplained_constant(df, code, "1", "How many above 0.75?")
+        assert r.fired is False
+
+    def test_unexplained_constant_no_fire_when_constant_in_data(self):
+        df = pd.DataFrame({"v": [1.5, 2.5, 3.5]})
+        code = "result = df['v'].sum() * 1.5"   # 1.5 IS in df['v']
+        r = unexplained_constant(df, code, "11.25", "Total scaled?")
+        assert r.fired is False
+
+    # --- cross-invariant: clean data should produce no fires ---
+
+    def test_clean_data_no_invariant_fires(self):
+        """On a clean table with straightforward code, no invariant should fire."""
+        df = pd.DataFrame({"salary": [50_000.0, 60_000.0, 55_000.0, 70_000.0]})
+        code = "result = df['salary'].mean()"
+        cfg = load_config(_CONFIG_PATH)
+        vr = run_invariants(df, code, "58750.0", "What is the average salary?", config=cfg)
+        assert vr.abstained is False
+        assert vr.confidence == pytest.approx(1.0)
+        assert len(vr.invariants) == 4  # all four, none fired
+
+
+# ---------------------------------------------------------------------------
+# Verifier unit tests
+# ---------------------------------------------------------------------------
+
+class TestVerifier:
+    def _cfg(self):
+        return load_config(_CONFIG_PATH)
+
+    def test_abstention_predicate_wrong_and_abstained_not_silent_error(self):
+        """wrong+abstained → not a silent error in metrics."""
+        rec_abstained = {"correct": False, "abstained": True, "confidence": 0.1}
+        rec_silent    = {"correct": False, "abstained": False, "confidence": 1.0}
+        m = compute([rec_abstained, rec_silent])
+        assert m["SER"] == pytest.approx(0.5)    # only the silent one counts
+
+    def test_trace_completeness(self):
+        """VerificationResult contains ALL invariants, not just fired ones."""
+        df = pd.DataFrame({"v": range(10)})
+        code = "result = df['v'].sum()"
+        vr = run_invariants(df, code, "45", "Total?", config=self._cfg())
+        assert len(vr.invariants) == 4   # duplicate_rows, numeric_outliers, dtype_mismatch, unexplained_constant
+        names = {r.name for r in vr.invariants}
+        assert "duplicate_rows" in names
+        assert "numeric_outliers" in names
+        assert "dtype_mismatch" in names
+        assert "unexplained_constant" in names
+
+    def test_confidence_1_when_nothing_fired(self):
+        df = pd.DataFrame({"v": range(10)})
+        code = "result = df['v'].sum()"
+        vr = run_invariants(df, code, "45", "Total?", config=self._cfg())
+        assert vr.confidence == pytest.approx(1.0)
+
+    def test_confidence_decreases_when_invariant_fires(self):
+        df = pd.DataFrame({"v": [1, 2, 3] * 20})   # many duplicates
+        code = "result = df['v'].sum()"
+        vr = run_invariants(df, code, "60", "Total?", config=self._cfg())
+        if vr.abstained:
+            assert vr.confidence < 1.0
+
+    def test_sur_abstention_computed_correctly(self):
+        """correct=True AND abstained=True is sur_abstention, not SER."""
+        records = [
+            {"correct": True,  "abstained": True},   # sur-abstention
+            {"correct": False, "abstained": True},   # right call — not silent error
+            {"correct": False, "abstained": False},  # silent error
+            {"correct": True,  "abstained": False},  # correct & answered
+        ]
+        m = compute(records)
+        assert m["sur_abstention"] == pytest.approx(0.25)  # 1/4
+        assert m["SER"] == pytest.approx(0.25)              # 1/4
 
 
 # ---------------------------------------------------------------------------
