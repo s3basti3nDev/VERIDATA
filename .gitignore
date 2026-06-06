@@ -43,7 +43,8 @@ Thumbs.db
 # Office temp files
 ~$*
 
-# Project documents (large binaries — tracked outside git)
-DOCUMENTS/
+# Project documents
 *.pdf
+# Ignore all docx except the R&D tracking journal
 *.docx
+!DOCUMENTS/JOURNAL DE SUIVI.docx
