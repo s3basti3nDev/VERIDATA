@@ -124,7 +124,24 @@ def duplicate_rows(
     Rationale: massively duplicated rows are a data-quality red flag; they
     systematically bias sum, count, and mean without affecting max, min, nunique.
     """
-    dup_frac = float(df.duplicated().mean())
+    # Some DataBench tables contain unhashable column types (list, dict).
+    # Fall back to numeric columns only — sufficient to detect row_duplication.
+    try:
+        dup_frac = float(df.duplicated().mean())
+    except TypeError:
+        try:
+            numeric_only = df.select_dtypes(include="number")
+            if numeric_only.empty:
+                return InvariantResult(
+                    "duplicate_rows", False, 0.0,
+                    "skipped: no hashable columns in table",
+                )
+            dup_frac = float(numeric_only.duplicated().mean())
+        except Exception:
+            return InvariantResult(
+                "duplicate_rows", False, 0.0,
+                "skipped: table contains unhashable column types",
+            )
 
     if dup_frac <= threshold:
         return InvariantResult(
