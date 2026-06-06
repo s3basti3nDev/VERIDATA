@@ -1,8 +1,9 @@
 """Pipeline tests.
 
-Mocked tests (TestExecutor, TestAgentMocked, TestNormalizedCompare) run without
-any network calls and cost nothing. Live tests (TestAgentLive) require a real
-API key and are gated behind VERIDATA_LIVE_TESTS=1.
+Mocked tests (TestExecutor, TestAgentMocked, TestNormalizedCompare,
+TestMetrics, TestPerturbations) run without any network calls and cost nothing.
+Live tests (TestAgentLive) require a real API key and are gated behind
+VERIDATA_LIVE_TESTS=1.
 """
 
 import os
@@ -21,6 +22,13 @@ from veridata.evaluator import (
     normalized_compare,
 )
 from veridata.executor import execute_code
+from veridata.metrics import compare, compute
+from veridata.perturbations import (
+    expected_sensitive,
+    locale_format,
+    outlier_injection,
+    row_duplication,
+)
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "baseline.toml"
 
@@ -287,6 +295,128 @@ class TestNormalizedCompare:
         evaluator = BaselineEvaluator.__new__(BaselineEvaluator)
         with pytest.raises(ValueError, match="Alignment mismatch"):
             evaluator.score(["a", "b"], [{"answer": "a", "type": "category"}])
+
+
+# ---------------------------------------------------------------------------
+# Metrics unit tests
+# ---------------------------------------------------------------------------
+
+class TestMetrics:
+    def _rec(self, correct: bool, abstained=None) -> dict:
+        return {"correct": correct, "abstained": abstained, "confidence": None}
+
+    def test_ser_equals_one_minus_precision_when_no_abstention(self):
+        """Week 2 invariant: abstained=None everywhere → SER = 1 − precision."""
+        records = [
+            self._rec(True),
+            self._rec(True),
+            self._rec(False),
+            self._rec(False),
+        ]
+        m = compute(records)
+        assert m["precision"] == pytest.approx(0.5)
+        assert m["SER"] == pytest.approx(0.5)
+        assert m["coverage"] == pytest.approx(1.0)
+        assert m["SER"] == pytest.approx(1.0 - m["precision"])
+
+    def test_abstained_reduces_SER(self):
+        """An abstained record is not counted as a silent error."""
+        records = [
+            self._rec(False, abstained=True),   # abstained → not a silent error
+            self._rec(False, abstained=None),    # wrong + not abstained → silent error
+        ]
+        m = compute(records)
+        assert m["SER"] == pytest.approx(0.5)    # only 1/2 is a silent error
+        assert m["coverage"] == pytest.approx(0.5)
+
+    def test_empty_records_returns_zeros(self):
+        m = compute([])
+        assert m["n"] == 0
+        assert m["precision"] == 0.0
+
+    def test_compare_clean_vs_perturbed(self):
+        clean = [self._rec(True)] * 4
+        perturbed = [self._rec(True)] * 2 + [self._rec(False)] * 2
+        result = compare(clean, perturbed)
+        assert result["precision_clean"] == pytest.approx(1.0)
+        assert result["precision_perturbed"] == pytest.approx(0.5)
+        assert result["delta_precision"] == pytest.approx(-0.5)
+        assert result["SER_clean"] == pytest.approx(0.0)
+        assert result["SER_perturbed"] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Perturbation unit tests
+# ---------------------------------------------------------------------------
+
+class TestPerturbations:
+    def test_row_duplication_changes_sum(self):
+        """Sum on perturbed table differs from clean; clean ground truth is preserved."""
+        df = pd.DataFrame({"value": [1, 2, 3, 4, 5]})
+        clean_sum = df["value"].sum()
+        df_pert, meta = row_duplication(df, dup_fraction=0.4, seed=42)
+        assert df_pert["value"].sum() != clean_sum
+        assert meta["n_rows_after"] > meta["n_rows_before"]
+
+    def test_row_duplication_does_not_change_max(self):
+        """Max is an order-statistic — unaffected by row duplication."""
+        df = pd.DataFrame({"value": [1, 2, 3, 4, 5]})
+        clean_max = df["value"].max()
+        df_pert, _ = row_duplication(df, dup_fraction=0.5, seed=42)
+        assert df_pert["value"].max() == clean_max
+
+    def test_locale_format_breaks_naive_parse(self):
+        """After locale_format, column is string-like and direct float() fails."""
+        df = pd.DataFrame({"price": [1234.56, 7890.12]})
+        df_pert, meta = locale_format(df, columns=["price"])
+        # dtype becomes string-like (object or StringDtype depending on pandas version)
+        assert not pd.api.types.is_numeric_dtype(df_pert["price"])
+        with pytest.raises((ValueError, TypeError)):
+            float(df_pert["price"].iloc[0])
+        assert "price" in meta["columns"]
+
+    def test_locale_format_output_shape(self):
+        """French format: comma decimal, space thousands."""
+        df = pd.DataFrame({"v": [1234.5]})
+        df_pert, _ = locale_format(df, columns=["v"])
+        val = df_pert["v"].iloc[0]
+        assert "," in val         # decimal separator
+        assert "." not in val     # no US decimal point
+
+    def test_outlier_injection_skews_mean(self):
+        """Mean changes after injection; count (len) does not."""
+        df = pd.DataFrame({"v": list(range(20))})
+        clean_mean = df["v"].mean()
+        df_pert, meta = outlier_injection(df, column="v", n_outliers=3, magnitude=50.0)
+        assert df_pert["v"].mean() != pytest.approx(clean_mean, rel=0.01)
+        assert len(df_pert) == len(df)
+        assert meta["cells_modified"] == 3
+
+    def test_perturbation_deterministic(self):
+        """Same seed → identical output."""
+        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+        out1, _ = row_duplication(df, dup_fraction=0.3, seed=7)
+        out2, _ = row_duplication(df, dup_fraction=0.3, seed=7)
+        pd.testing.assert_frame_equal(out1, out2)
+
+    # expected_sensitive labels
+    def test_expected_sensitive_row_dup_max_question_is_false(self):
+        assert expected_sensitive("What is the maximum revenue?", "row_duplication") is False
+
+    def test_expected_sensitive_row_dup_min_question_is_false(self):
+        assert expected_sensitive("What is the minimum score?", "row_duplication") is False
+
+    def test_expected_sensitive_row_dup_sum_question_is_true(self):
+        assert expected_sensitive("What is the total revenue?", "row_duplication") is True
+
+    def test_expected_sensitive_locale_always_true(self):
+        assert expected_sensitive("What is the maximum value?", "locale_format") is True
+
+    def test_expected_sensitive_outlier_count_is_false(self):
+        assert expected_sensitive("How many rows have a positive value?", "outlier_injection") is False
+
+    def test_expected_sensitive_outlier_mean_is_true(self):
+        assert expected_sensitive("What is the average salary?", "outlier_injection") is True
 
 
 # ---------------------------------------------------------------------------
