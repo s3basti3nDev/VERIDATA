@@ -106,7 +106,12 @@ def main() -> None:
             table_cache[str(parquet_path)] = pd.read_parquet(parquet_path)
         df = table_cache[str(parquet_path)]
 
-        result = agent.answer(question=row["question"], df=df)
+        try:
+            result = agent.answer(question=row["question"], df=df)
+        except Exception as exc:
+            log.warning(f"[{idx}/{len(manifest)}] API error — skipping: {exc}")
+            records.append({"correct": False, "abstained": True, "confidence": 0.0})
+            continue
 
         # Invariant verification layer
         verification = run_invariants(
