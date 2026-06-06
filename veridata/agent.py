@@ -64,7 +64,7 @@ class DataAnalysisAgent:
         )
 
         raw = response.content[0].text
-        code = _strip_fences(raw)
+        code = _extract_code(raw)
 
         value, error = execute_code(
             code=code,
@@ -92,8 +92,49 @@ def _describe_schema(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _strip_fences(text: str) -> str:
-    """Remove markdown code fences if the model ignored the prompt instructions."""
-    text = re.sub(r"^```(?:python)?\s*\n?", "", text.strip(), flags=re.MULTILINE)
-    text = re.sub(r"\n?```\s*$", "", text.strip(), flags=re.MULTILINE)
-    return text.strip()
+def _extract_code(text: str) -> str:
+    """Extract executable Python code from an LLM response.
+
+    Strategy:
+    1. If a fenced block (```python or ```) exists anywhere in the text,
+       return its content and ignore everything outside the fence.
+    2. Otherwise, find the first ``result =`` line. Walk backwards and drop
+       any preceding line that does not compile as Python — those are natural-
+       language preambles inserted by the model despite the prompt instruction.
+    """
+    text = text.strip()
+
+    # 1. Extract from the first fenced code block found anywhere in the text.
+    fence_match = re.search(r"```(?:python)?\s*\n(.*?)\n?```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+
+    # 2. No fence: locate first `result =` and strip non-code lines above it.
+    lines = text.splitlines()
+    result_idx = next(
+        (i for i, ln in enumerate(lines) if re.match(r"\s*result\s*=", ln)),
+        None,
+    )
+    if result_idx is None:
+        return text  # no result= found; return as-is and let executor report the error
+
+    start = result_idx
+    for i in range(result_idx - 1, -1, -1):
+        if _is_python_line(lines[i]):
+            start = i
+        else:
+            break  # first non-code line going up → everything above is prose
+
+    return "\n".join(lines[start:]).strip()
+
+
+def _is_python_line(line: str) -> bool:
+    """Return True if the line is empty, a comment, or compiles as Python."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return True
+    try:
+        compile(stripped, "<check>", "exec")
+        return True
+    except SyntaxError:
+        return False

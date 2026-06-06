@@ -119,6 +119,39 @@ class TestAgentMocked:
         assert r.answer == "6"
         assert "```" not in r.generated_code
 
+    def test_natural_language_prefix_stripped(self):
+        """q02 pattern: model outputs a sentence before the code."""
+        raw = "Sure, here's the code to answer your question:\nresult = df['a'].sum()"
+        agent = self._agent(raw)
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        r = agent.answer("Total?", df)
+        assert r.answer == "6"
+        assert "Sure" not in r.generated_code
+
+    def test_fence_anywhere_in_response(self):
+        """Fence buried after an explanation preamble — extract only the block."""
+        raw = (
+            "I'll compute this step by step.\n\n"
+            "```python\n"
+            "result = df['value'].max()\n"
+            "```\n\n"
+            "This gives the maximum value."
+        )
+        agent = self._agent(raw)
+        df = pd.DataFrame({"value": [10, 50, 30]})
+        r = agent.answer("Max?", df)
+        assert r.answer == "50"
+        assert "I'll" not in r.generated_code
+        assert "This gives" not in r.generated_code
+
+    def test_intermediate_variable_preserved(self):
+        """Setup code before result= must be kept when it compiles cleanly."""
+        raw = "Here is the solution:\nfiltered = df[df['a'] > 1]\nresult = filtered['a'].sum()"
+        agent = self._agent(raw)
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        r = agent.answer("Sum of values > 1?", df)
+        assert r.answer == "5"   # 2 + 3
+
     def test_generated_code_and_raw_response_stored(self):
         code = "result = len(df)"
         agent = self._agent(code)
@@ -162,8 +195,9 @@ class TestNormalizedCompare:
     def test_list_category_same_order(self):
         assert _compare_list_category("apple, banana", "apple, banana") is True
 
-    def test_list_category_different_order(self):
-        assert _compare_list_category("banana, apple", "apple, banana") is True
+    def test_list_category_different_order_is_wrong(self):
+        # DataBench uses ordered comparison — position matters
+        assert _compare_list_category("banana, apple", "apple, banana") is False
 
     def test_list_category_case_insensitive(self):
         assert _compare_list_category("Apple, Banana", "apple, banana") is True
@@ -177,6 +211,44 @@ class TestNormalizedCompare:
     def test_list_category_different_lengths(self):
         assert _compare_list_category("apple, banana, cherry", "apple, banana") is False
 
+    def test_list_category_literal_strips_brackets_and_quotes(self):
+        assert _compare_list_category("['apple','banana']", "apple, banana") is True
+
+    # --- list[category] parametrized: literal vs CSV — these FAIL on current impl ---
+    @pytest.mark.parametrize("value,truth", [
+        # q15 — exact case from run output
+        ("['reply','original']",              "reply, original"),
+        # q32–q35 style: list literal vs CSV, same content, same order
+        ("['es','es','es','es','es']",        "es, es, es, es, es"),
+        ("['paris','london','berlin']",       "paris, london, berlin"),
+        ("['foo','bar','baz']",               "foo, bar, baz"),
+        ("['alpha','beta','gamma','delta']",  "alpha, beta, gamma, delta"),
+    ])
+    def test_list_category_literal_vs_csv(self, value, truth):
+        """List literal and CSV with identical content must compare as equal.
+
+        All five cases fail with the set-based implementation (brackets and
+        quotes are not stripped before the split, so token shapes differ).
+        They must all pass after the _parse_list fix.
+        """
+        assert normalized_compare(value, truth, "list[category]") is True
+
+    # --- list[number] ---
+    def test_list_number_exact(self):
+        assert normalized_compare("1, 2, 3", "1, 2, 3", "list[number]") is True
+
+    def test_list_number_literal_vs_csv(self):
+        assert normalized_compare("['1.0','2.0','3.0']", "1, 2, 3", "list[number]") is True
+
+    def test_list_number_tolerance(self):
+        assert normalized_compare("1.00009, 2.0", "1.0, 2.0", "list[number]") is True
+
+    def test_list_number_different_order_is_wrong(self):
+        assert normalized_compare("2, 1", "1, 2", "list[number]") is False
+
+    def test_list_number_different_lengths(self):
+        assert normalized_compare("1, 2, 3", "1, 2", "list[number]") is False
+
     # --- other types use case-insensitive exact match ---
     def test_boolean_case_insensitive(self):
         assert normalized_compare("True", "true", "boolean") is True
@@ -186,23 +258,25 @@ class TestNormalizedCompare:
         assert normalized_compare("  Paris  ", "Paris", "category") is True
 
     def test_unknown_semantic_falls_back_to_str(self):
-        assert normalized_compare("hello", "hello", "list[number]") is True
-        assert normalized_compare("hello", "world", "list[number]") is False
+        # list[number] is now a known handler; use a truly unknown type
+        assert normalized_compare("hello", "hello", "set[category]") is True
+        assert normalized_compare("hello", "world", "set[category]") is False
 
     # --- score() alignment test ---
     def test_score_three_correct_one_wrong(self):
         """Core alignment test: score() must return 0.75 for 3/4 correct pairs.
 
-        This test would have caught the Evaluator.eval() alignment bug
-        (which produced 0.0022 instead of ~0.82) immediately.
+        The list[category] response uses list-literal format vs CSV truth,
+        same order — tests both alignment and the _parse_list normalisation.
+        The number case is deliberately >1e-4 off to be the single wrong answer.
         """
         sample = [
-            {"answer": "42",            "type": "number"},        # ✓ float vs int
-            {"answer": "Paris",         "type": "category"},      # ✓ case-insensitive
-            {"answer": "apple, banana", "type": "list[category]"},# ✓ order-insensitive
-            {"answer": "100",           "type": "number"},        # ✗ 1 % off
+            {"answer": "42",            "type": "number"},         # ✓ float vs int
+            {"answer": "Paris",         "type": "category"},       # ✓ case-insensitive
+            {"answer": "apple, banana", "type": "list[category]"}, # ✓ literal vs CSV, same order
+            {"answer": "100",           "type": "number"},         # ✗ 1 % off → False
         ]
-        responses = ["42.0", "paris", "banana, apple", "101"]
+        responses = ["42.0", "paris", "['apple','banana']", "101"]
 
         evaluator = BaselineEvaluator.__new__(BaselineEvaluator)  # skip __init__ / HF download
         acc = evaluator.score(responses, sample)

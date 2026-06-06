@@ -4,26 +4,42 @@ API notes (databench-eval >= 4.0):
 - load_qa(name, split) → HuggingFace Dataset (normalised to list[dict] on load).
   Keys: question, answer, type, dataset, columns_used, sample_answer.
 - load_table(dataset_id) → pd.DataFrame.
-- Evaluator().eval(responses) was removed from this module.
 
 Why we do NOT use Evaluator().eval()
 -------------------------------------
-Evaluator.eval() computes accuracy against its *own internal copy* of the full
-1822-question dataset.  When we pass N < 1822 responses, it compares
-responses[i] against internal_qa[i], but the internal ordering may differ from
-the ordering returned by load_qa() — causing a severe alignment mismatch
-(observed: 0.0022 accuracy on a run where manual inspection showed ~82%).
+Evaluator.eval() compares responses against its own internal QA copy whose
+ordering may differ from load_qa() — producing severe alignment mismatch
+(observed: accuracy=0.0022 on a run that was manually ~82%).
 
-Fix: score() accepts both responses and the sample used to generate them, then
-calls normalized_compare(response, ground_truth, type) for each aligned pair.
-The verdict is also written to the JSONL as a ``correct`` field so every run
-is auditable line by line.
+score(responses, sample) computes accuracy locally against the sample rows
+that were actually used to generate the responses, guaranteeing alignment.
+The verdict is also stored as a ``correct`` field in the JSONL for per-record
+auditability.
 
-Normalized comparator
----------------------
-- number:          relative tolerance 1e-4 (absolute fallback when truth == 0)
-- list[category]:  unordered set comparison, case-insensitive
-- all others:      case-insensitive exact match after strip
+Normalized comparator — design decisions
+-----------------------------------------
+DataBench answer types: boolean | number | category | list[number] | list[category]
+
+number:
+  Relative tolerance 1e-4.  Absolute fallback when truth == 0.
+  "42.0" == "42", "1234.57" == "1234.5699…"
+
+list[category] and list[number]:
+  The LLM frequently returns Python list literals (['a','b']) while the
+  ground truth is CSV ("a, b").  The previous set-based comparator failed to
+  strip brackets/quotes, producing false negatives for any multi-element list
+  where the sets differed after the malformed split.
+
+  Fix: _parse_list normalises both sides identically:
+    1. Strip surrounding [ ].
+    2. Split on ','.
+    3. Per item: strip whitespace, strip matching '' or "" quotes, lowercase.
+
+  Ordering: DataBench evaluates list answers in order (position matters).
+  _compare_list_category and _compare_list_number use list equality, not set.
+
+boolean / category:
+  Case-insensitive exact match after strip.
 """
 
 from typing import Optional
@@ -33,11 +49,35 @@ from databench_eval.utils import load_qa, load_table
 
 
 # ---------------------------------------------------------------------------
-# Normalized comparator — public so run_baseline.py can use it per-record
+# Parsing helper
+# ---------------------------------------------------------------------------
+
+def _parse_list(s: str) -> list[str]:
+    """Normalise a list answer to stripped, lowercased strings.
+
+    Accepts both Python list-literal format (['a','b']) and CSV (a, b).
+    Strips surrounding [ ], then for each comma-separated token strips
+    whitespace and matching surrounding quotes.
+    """
+    s = s.strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    items: list[str] = []
+    for raw in s.split(","):
+        item = raw.strip()
+        if len(item) >= 2 and item[0] in ("'", '"') and item[-1] == item[0]:
+            item = item[1:-1].strip()
+        if item:
+            items.append(item.lower())
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Per-type comparators — public for direct testing
 # ---------------------------------------------------------------------------
 
 def _compare_number(value: str, truth: str) -> bool:
-    """Relative tolerance 1e-4; falls back to absolute when truth == 0."""
+    """Relative tolerance 1e-4; absolute fallback when truth == 0."""
     v = float(str(value).strip().replace(",", "."))
     t = float(str(truth).strip().replace(",", "."))
     if t == 0.0:
@@ -46,24 +86,42 @@ def _compare_number(value: str, truth: str) -> bool:
 
 
 def _compare_list_category(value: str, truth: str) -> bool:
-    """Order-insensitive set comparison, case-insensitive, strip-normalised."""
-    def to_set(s: str) -> set[str]:
-        return {item.strip().lower() for item in s.split(",") if item.strip()}
-    return to_set(value) == to_set(truth)
+    """Ordered list comparison for list[category].
+
+    Normalises both sides via _parse_list (handles list-literal and CSV).
+    Ordered per DataBench spec: position matters.
+    """
+    return _parse_list(value) == _parse_list(truth)
+
+
+def _compare_list_number(value: str, truth: str) -> bool:
+    """Ordered list comparison for list[number] with per-element tolerance 1e-4."""
+    v_items = _parse_list(value)
+    t_items = _parse_list(truth)
+    if len(v_items) != len(t_items):
+        return False
+    try:
+        return all(_compare_number(v, t) for v, t in zip(v_items, t_items))
+    except (ValueError, TypeError):
+        return False
 
 
 def normalized_compare(value: str, truth: str, semantic: str) -> bool:
-    """Normalized comparator for DataBench answer types.
+    """Normalized comparator for all DataBench answer types.
 
     - ``number``         → relative tolerance 1e-4
-    - ``list[category]`` → unordered set, case-insensitive
-    - all others         → case-insensitive exact match after strip
+    - ``list[category]`` → ordered, case-insensitive, handles list-literal & CSV
+    - ``list[number]``   → ordered, per-element tolerance 1e-4
+    - ``boolean``        → case-insensitive exact match
+    - ``category``       → case-insensitive exact match
     """
     try:
         if semantic == "number":
             return _compare_number(value, truth)
         if semantic == "list[category]":
             return _compare_list_category(value, truth)
+        if semantic == "list[number]":
+            return _compare_list_number(value, truth)
         return str(value).strip().lower() == str(truth).strip().lower()
     except (ValueError, TypeError):
         return False
@@ -86,7 +144,6 @@ class BaselineEvaluator:
         """Return the first ``n`` QA entries in dataset order (deterministic)."""
         if self._qa is None:
             raw = load_qa(name=self._name, split=self._split)
-            # load_qa returns a HuggingFace Dataset; normalise to list[dict].
             self._qa = list(raw) if not isinstance(raw, list) else raw
         return self._qa[:n]
 
@@ -100,12 +157,8 @@ class BaselineEvaluator:
     def score(self, responses: list[str], sample: list[dict]) -> float:
         """Return accuracy computed locally from aligned (response, QA-row) pairs.
 
-        Each ``responses[i]`` is compared against ``sample[i]["answer"]`` using
-        ``normalized_compare``.  This guarantees alignment and is identical to
-        the ``correct`` field written to the JSONL — so the displayed accuracy
-        is always consistent with the per-record audit trail.
-
-        Raises ``ValueError`` if lengths differ (alignment guard).
+        Each ``responses[i]`` is compared against ``sample[i]`` using
+        ``normalized_compare``.  Raises ``ValueError`` on length mismatch.
         """
         if len(responses) != len(sample):
             raise ValueError(
