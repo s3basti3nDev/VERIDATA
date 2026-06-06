@@ -28,12 +28,20 @@ def compute(records: list[dict[str, Any]]) -> dict[str, Any]:
         1 for r in records
         if r.get("correct") is not True and r.get("abstained") is not True
     )
+    # sur_abstention: correct answers that were needlessly abstained on (false positives
+    # in abstention; = mean(abstained) on a perfectly-accurate run)
+    n_sur_abstention = sum(
+        1 for r in records
+        if r.get("correct") is True and r.get("abstained") is True
+    )
 
     return {
         "n": n,
         "precision": n_correct / n,
         "SER": n_silent_error / n,
         "coverage": n_answered / n,
+        "sur_abstention": n_sur_abstention / n,
+        # false_positive_rate on clean data ≈ mean(abstained) = 1 - coverage
     }
 
 
