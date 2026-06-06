@@ -1,8 +1,8 @@
 """Pipeline tests.
 
-Mocked tests (TestExecutor, TestAgentMocked) run without any network calls and
-cost nothing. Live tests (TestAgentLive) require a real API key and are gated
-behind VERIDATA_LIVE_TESTS=1 so they never run in CI by accident.
+Mocked tests (TestExecutor, TestAgentMocked, TestNormalizedCompare) run without
+any network calls and cost nothing. Live tests (TestAgentLive) require a real
+API key and are gated behind VERIDATA_LIVE_TESTS=1.
 """
 
 import os
@@ -14,6 +14,7 @@ import pytest
 
 from veridata.agent import AgentResult, DataAnalysisAgent
 from veridata.config import load_config
+from veridata.evaluator import _compare_list_category, _compare_number, normalized_compare
 from veridata.executor import execute_code
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "baseline.toml"
@@ -120,6 +121,68 @@ class TestAgentMocked:
         r = agent.answer("How many rows?", df)
         assert r.generated_code == code
         assert r.raw_response == code
+
+
+# ---------------------------------------------------------------------------
+# Normalized comparator unit tests
+# ---------------------------------------------------------------------------
+
+class TestNormalizedCompare:
+    # --- number ---
+    def test_number_exact_int(self):
+        assert _compare_number("42", "42") is True
+
+    def test_number_float_vs_int(self):
+        assert _compare_number("42.0", "42") is True
+
+    def test_number_within_tolerance(self):
+        # 1234.5699 vs 1234.5700 — relative diff ≈ 8e-8 < 1e-4
+        assert _compare_number("1234.5699", "1234.5700") is True
+
+    def test_number_outside_tolerance(self):
+        # 100 vs 101 — relative diff = 1% >> 1e-4
+        assert _compare_number("100", "101") is False
+
+    def test_number_zero_truth_abs_fallback(self):
+        assert _compare_number("0.0", "0") is True
+        assert _compare_number("0.001", "0") is False
+
+    def test_number_negative(self):
+        assert _compare_number("-42.0", "-42") is True
+
+    def test_number_bad_value_returns_false(self):
+        assert normalized_compare("not_a_number", "42", "number") is False
+
+    # --- list[category] ---
+    def test_list_category_same_order(self):
+        assert _compare_list_category("apple, banana", "apple, banana") is True
+
+    def test_list_category_different_order(self):
+        assert _compare_list_category("banana, apple", "apple, banana") is True
+
+    def test_list_category_case_insensitive(self):
+        assert _compare_list_category("Apple, Banana", "apple, banana") is True
+
+    def test_list_category_extra_spaces(self):
+        assert _compare_list_category("apple ,  banana", "apple, banana") is True
+
+    def test_list_category_different_sets(self):
+        assert _compare_list_category("apple, cherry", "apple, banana") is False
+
+    def test_list_category_different_lengths(self):
+        assert _compare_list_category("apple, banana, cherry", "apple, banana") is False
+
+    # --- other types use case-insensitive exact match ---
+    def test_boolean_case_insensitive(self):
+        assert normalized_compare("True", "true", "boolean") is True
+        assert normalized_compare("False", "true", "boolean") is False
+
+    def test_category_strip(self):
+        assert normalized_compare("  Paris  ", "Paris", "category") is True
+
+    def test_unknown_semantic_falls_back_to_str(self):
+        assert normalized_compare("hello", "hello", "list[number]") is True
+        assert normalized_compare("hello", "world", "list[number]") is False
 
 
 # ---------------------------------------------------------------------------
