@@ -19,3 +19,8 @@ max_rows        = 50_000   # rows fed to exec(); larger tables are truncated
 
 [paths]
 runs_dir = "runs"   # relative to project root; holds per-run .jsonl files
+
+[invariants]
+duplicate_row_threshold = 0.05   # dup fraction above which duplicate_rows fires
+outlier_iqr_factor      = 5.0   # k in Q1-k*IQR / Q3+k*IQR; strict to limit false positives
+trivial_constants       = [0, 1, 2, -1, 100, 0.5]  # excluded from unexplained_constant
