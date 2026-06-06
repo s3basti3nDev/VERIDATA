@@ -14,6 +14,10 @@ import json
 import sys
 from pathlib import Path
 
+# Mirrors verifier._ABSTAINING_INVARIANTS — trace-only invariants do not
+# trigger abstention (no discriminating power on real DataBench tables).
+_TRACE_ONLY = frozenset({"numeric_outliers"})
+
 
 def _load_jsonl(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as fh:
@@ -59,17 +63,21 @@ def main() -> None:
         print("  (no invariant trace — run was not produced by run_verified.py)")
         return
 
-    print("  Invariant trace:")
-    print(f"  {'Name':<26} {'Fired':<7} {'Sev':>5}  Detail")
-    print("  " + "-" * 68)
+    print("  Invariant trace:  (* = trace only, does not trigger abstention)")
+    print(f"  {'Name':<28} {'Fired':<12} {'Sev':>5}  Detail")
+    print("  " + "-" * 70)
     for inv in invariants:
-        fired_str = "FIRED" if inv["fired"] else "ok"
+        trace_only = inv["name"] in _TRACE_ONLY
+        marker = "*" if trace_only else " "
+        if inv["fired"]:
+            fired_str = "(trace)" if trace_only else "FIRED"
+        else:
+            fired_str = "ok"
         sev_str = f"{inv['severity']:.2f}"
         detail = inv["detail"]
-        # Wrap long details
         if len(detail) > 50:
             detail = detail[:47] + "…"
-        print(f"  {inv['name']:<26} {fired_str:<7} {sev_str:>5}  {detail}")
+        print(f"  {marker}{inv['name']:<27} {fired_str:<12} {sev_str:>5}  {detail}")
 
     print("=" * 72)
 

@@ -4,13 +4,22 @@ run_invariants() applies all four invariants to an agent result and returns a
 VerificationResult with abstention decision, confidence score, and the full
 audit trace.
 
-Design principles
+Abstention policy
 -----------------
-- Abstention policy: conservative — any fired invariant → abstained=True.
-  A single data-quality violation is enough to distrust the result.
-- Confidence: 1.0 − max(severity of fired invariants). Stays 1.0 if none fire.
-- Trace: ALL invariants are returned (not just fired ones) so the audit log
-  shows what was checked, not only what failed.
+Only invariants with demonstrated discriminating power trigger abstention.
+``numeric_outliers`` is computed and included in the trace but does NOT trigger
+abstention: on real-world DataBench tables (follower counts, revenues, sports
+scores) it fires at the same rate on clean and perturbed data — delta ≈ 0.
+An injected outlier is statistically indistinguishable from a real one, so
+keeping it in the abstention decision degrades precision without improving recall.
+
+Abstaining invariants and their target perturbation class:
+    duplicate_rows        → row_duplication  (biases sum/mean/count)
+    dtype_mismatch        → locale_format    (numeric col becomes string)
+    unexplained_constant  → hallucinated constant (free-floating coefficient)
+
+Confidence: 1.0 − max(severity of ABSTAINING fired invariants). 1.0 if none.
+Trace: ALL four invariants are returned so the audit log is complete.
 """
 
 from __future__ import annotations
@@ -29,11 +38,21 @@ from .invariants import (
 )
 
 
+# Invariants that participate in the abstention decision.
+# numeric_outliers is excluded: fires equally on clean and perturbed data
+# (injected outlier ≡ real outlier, statistically).
+_ABSTAINING_INVARIANTS: frozenset[str] = frozenset({
+    "duplicate_rows",
+    "dtype_mismatch",
+    "unexplained_constant",
+})
+
+
 @dataclass
 class VerificationResult:
-    abstained: bool          # True if at least one invariant fired
-    confidence: float        # 1.0 − max(severity of fired); 1.0 if none fired
-    invariants: list[InvariantResult]   # full trace — all invariants, fired or not
+    abstained: bool          # True if an ABSTAINING invariant fired
+    confidence: float        # 1.0 − max(severity of abstaining fired); 1.0 if none
+    invariants: list[InvariantResult]   # full trace — all four invariants
 
 
 def run_invariants(
@@ -70,9 +89,9 @@ def run_invariants(
         ),
     ]
 
-    fired = [r for r in results if r.fired]
-    abstained = len(fired) > 0
-    max_severity = max((r.severity for r in fired), default=0.0)
+    abstaining_fired = [r for r in results if r.fired and r.name in _ABSTAINING_INVARIANTS]
+    abstained = len(abstaining_fired) > 0
+    max_severity = max((r.severity for r in abstaining_fired), default=0.0)
     confidence = 1.0 - max_severity
 
     return VerificationResult(

@@ -131,10 +131,27 @@ false_positive_rate = mean(abstained) sur run clean   # ≈ 1 − coverage sur c
 ### Principe directeur
 
 Un invariant ne calcule JAMAIS la réponse. Sa sortie est binaire (fired/non-fired)
-+ un détail traçable. Si au moins un invariant fire → abstained=True.
++ un détail traçable.
 
 **Contrainte anti-confond** : les invariants sont des contrôles data-quality
 LÉGITIMES, justifiables indépendamment de nos perturbations.
+
+### Politique d'abstention (révisée après mesure empirique)
+
+Seuls les invariants avec pouvoir discriminant prouvé déclenchent l'abstention.
+`numeric_outliers` est **trace-only** : sur les tables DataBench réelles, il fire
+à taux quasi-identique sur données propres et perturbées (delta ≈ 0), ce qui
+dégrade la précision de l'abstention sans améliorer le recall.
+
+**Raison fondamentale** : un outlier injecté est statistiquement indistinguable
+d'un outlier réel (followers Twitter, revenus d'entreprise, scores sportifs).
+
+| Invariant | Cible perturbation | Déclenche abstention |
+|---|---|---|
+| `duplicate_rows` | row_duplication | ✅ OUI |
+| `numeric_outliers` | outlier_injection | ❌ TRACE ONLY |
+| `dtype_mismatch` | locale_format | ✅ OUI |
+| `unexplained_constant` | hallucination LLM | ✅ OUI |
 
 ### Fallback conservateur pour indirection
 
@@ -142,14 +159,14 @@ Quand l'AST détecte un subscript dynamique (variable en clé plutôt que litté
 `numeric_outliers` et `dtype_mismatch` élargissent leur scope à TOUTES les colonnes
 et inscrivent `scope=all_columns, reason=indirection` dans le détail.
 
-### Les quatre invariants
+### Les quatre invariants — détail
 
-| Invariant | Cible principale | Condition de déclenchement |
-|---|---|---|
-| `duplicate_rows` | row_duplication | dup_fraction > threshold (0.05) ET agg sensible dans code |
-| `numeric_outliers` | outlier_injection | valeurs au-delà k×IQR (k=5) dans colonnes référencées |
-| `dtype_mismatch` | locale_format | colonne non-numérique utilisée dans une agg numérique |
-| `unexplained_constant` | hallucination LLM | littéral float dans BinOp (×÷+−), absent données+question |
+| Invariant | Condition de déclenchement |
+|---|---|
+| `duplicate_rows` | dup_fraction > threshold (0.05) ET agg sensible dans code |
+| `numeric_outliers` | valeurs au-delà k×IQR (k=5) dans colonnes référencées |
+| `dtype_mismatch` | colonne non-numérique utilisée dans une agg numérique |
+| `unexplained_constant` | littéral float dans BinOp (×÷+−), absent données+question |
 
 **`unexplained_constant` — périmètre précis** : seuls les opérandes de BinOp
 (Mult/Div/Add/Sub) sont ciblés. Les constantes dans les Compare (seuils légitimes,
@@ -162,11 +179,6 @@ duplicate_row_threshold = 0.05   # sensible à partir de 5 % de doublons exacts
 outlier_iqr_factor      = 5.0   # strict pour limiter faux positifs sur données réelles
 trivial_constants       = [0, 1, 2, -1, 100, 0.5]
 ```
-
-**Note sur `numeric_outliers`** : k=5 est intentionnellement strict car les données
-réelles contiennent de vrais outliers (followers Twitter, revenus, etc.). Si le taux
-de faux positifs sur clean est élevé, augmenter k. Le réglage retenu est documenté
-dans les résultats des runs.
 
 ### Limite documentée (à ne pas masquer)
 
@@ -228,6 +240,21 @@ python scripts/run_verified.py --manifest <manifest>            # SER avec invar
 ```powershell
 python scripts/show_trace.py --run runs/verified_....jsonl --question_idx 5
 ```
+
+### Tableau de discrimination par invariant (résultat headline)
+
+```powershell
+# Perturbed + clean (recommandé)
+python scripts/analyze_invariants.py `
+    --perturbed runs/verified_row_duplication_....jsonl `
+    --clean     runs/verified_clean_....jsonl
+
+# Perturbed seul (sans fire_rate_clean)
+python scripts/analyze_invariants.py --perturbed runs/verified_....jsonl
+```
+
+Colonnes : `fire_rate_perturbed`, `fire_rate_clean`, `delta` (pouvoir discriminant),
+`precision` P(wrong|fired), `recall` P(fired|wrong), `abstains` (Y / N trace).
 
 ### Comparer clean vs perturbé (Python interactif)
 
@@ -297,7 +324,8 @@ scripts/
   make_perturbed.py   # génère dataset perturbé (Parquet + manifest)
   run_perturbed.py    # run sans invariants (--clean ou perturbé)
   run_verified.py     # run avec invariants (--clean pour FPR)
-  show_trace.py       # affiche trace auditable pour une question
+  show_trace.py           # affiche trace auditable pour une question
+  analyze_invariants.py   # tableau de discrimination par invariant (headline)
 configs/
   baseline.toml       # inclut section [invariants]
 runs/                 # JSONL par run (gitignored)
@@ -317,12 +345,14 @@ tests/
 - `verifier.py` : abstention + confidence + trace auditable complète
 - `run_verified.py` : pipeline complet avec vérification
 - `show_trace.py` : auditabilité par question
+- `analyze_invariants.py` : tableau de discrimination par invariant (headline)
 - Seuil k=5 pour `numeric_outliers` (justifié par données réelles)
 - Périmètre `unexplained_constant` : BinOp uniquement, exclusion Compare/Subscript
+- **Politique d'abstention révisée** : `numeric_outliers` trace-only (delta≈0 sur DataBench)
 - Limite documentée : classe "sémantique plausible + grounded" non couverte
 
 ### ⬜ Semaine 4 — Rapport final
-- Runs vérifiés sur les 3 modes (results Semaine 3 à compléter)
+- Runs vérifiés sur les 3 modes + tableau de discrimination par invariant
 - Visualisations : SER sans vs avec, courbe coverage vs SER
 - Benchmark multi-modèles si budget
 - Rapport final

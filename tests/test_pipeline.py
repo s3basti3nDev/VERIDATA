@@ -572,6 +572,17 @@ class TestVerifier:
         if vr.abstained:
             assert vr.confidence < 1.0
 
+    def test_numeric_outliers_trace_only_does_not_abstain(self):
+        """numeric_outliers fires but must NOT trigger abstention (trace-only policy)."""
+        values = list(range(1, 20)) + [100_000]   # genuine extreme outlier
+        df = pd.DataFrame({"v": values})
+        code = "result = df['v'].mean()"
+        vr = run_invariants(df, code, "...", "What is the mean?", config=self._cfg())
+        no_inv = next(r for r in vr.invariants if r.name == "numeric_outliers")
+        assert no_inv.fired is True, "numeric_outliers should still detect the outlier"
+        assert vr.abstained is False, "numeric_outliers alone must not trigger abstention"
+        assert vr.confidence == pytest.approx(1.0), "confidence unaffected by trace-only invariant"
+
     def test_sur_abstention_computed_correctly(self):
         """correct=True AND abstained=True is sur_abstention, not SER."""
         records = [
