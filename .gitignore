@@ -21,6 +21,7 @@ env/
 runs/*.jsonl
 runs/*.json
 runs/*.csv
+runs/perturbed/
 
 # HuggingFace cache
 .cache/
