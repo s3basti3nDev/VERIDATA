@@ -205,18 +205,21 @@ def numeric_outliers(
     for col in cols:
         if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
             continue
-        series = df[col].dropna()
-        if len(series) < 4:
-            continue
-        q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
-        iqr = q3 - q1
-        if iqr == 0:
-            continue
-        lo, hi = q1 - k * iqr, q3 + k * iqr
-        outliers = series[(series < lo) | (series > hi)]
-        if not outliers.empty:
-            sample = outliers.values[:3].tolist()
-            extreme.append(f"{col}: {sample}")
+        try:
+            series = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(series) < 4:
+                continue
+            q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
+            iqr = q3 - q1
+            if iqr == 0:
+                continue
+            lo, hi = q1 - k * iqr, q3 + k * iqr
+            outliers = series[(series < lo) | (series > hi)]
+            if not outliers.empty:
+                sample = outliers.values[:3].tolist()
+                extreme.append(f"{col}: {sample}")
+        except (TypeError, ValueError):
+            continue  # skip columns whose values can't be compared numerically
 
     scope_tag = "scope=all_columns, reason=indirection; " if fallback else ""
 
