@@ -1,10 +1,10 @@
 # VERIDATA — Rapport final
 ## Mesurer la fiabilité vérifiable des agents d'analyse de données
 
-**Auteur** : Sébastien Tamagno  
-**Modèle évalué** : `claude-sonnet-4-6`, température 0  
-**Dataset** : DataBench (`cardiffnlp/databench`, split `dev`) — 30 questions `number`  
-**Date** : 2026-06-06  
+**Auteur** : Sébastien Tamagno
+**Modèle évalué** : `claude-sonnet-4-6`, température 0
+**Dataset** : DataBench (`cardiffnlp/databench`, split `dev`) — 30 questions `number`
+**Date** : 2026-06-06
 
 ---
 
@@ -27,8 +27,21 @@ se déclenche, l'agent s'abstient.
 
 **Résultat phare** : sur une corruption de type duplication de lignes (severity 0.3),
 l'invariant `duplicate_rows` atteint un pouvoir discriminant Δ = **+0.807
-[IC Wilson 95 % : 0.636 – 0.890]** avec un taux de faux positifs de **16.7 % [0.103,
-0.258]** sur données propres. Le SER passe de **50 % à 6.7 %** (réduction de 87 %).
+[IC Wilson 95 % : 0.636 – 0.890]** et — point important — un **taux de faux positifs
+de 0 %** sur données propres (0/30). Le SER passe de **50 % à 6.7 %**, mais au prix
+d'une **couverture de 35.6 %** seulement : sous la politique d'abstention à trois
+invariants, l'agent ne répond qu'à une question sur trois.
+
+Cette faible couverture ne vient pas de `duplicate_rows` (FPR nul) mais des invariants
+décisionnels faibles, en particulier `dtype_mismatch` (FPR 16.7 %). Une politique
+restreinte à `duplicate_rows` seul donnerait, sur ce mode, un FPR de 0 % et une
+couverture de 100 % sur données propres. **Atteindre un SER bas à couverture
+acceptable est donc le problème ouvert central** — pas un détail d'industrialisation.
+
+> Réserve statistique majeure : les intervalles ci-dessus reposent sur n = 30 questions
+> (et un seul modèle). Le pooling K=3 porte le n nominal à 90, mais le modèle est
+> quasi-déterministe à T=0 (27/30 codes identiques entre runs) : le **n effectif reste
+> proche de 30**, et les IC Wilson sur n=90 sont donc optimistes. Voir §6.
 
 ---
 
@@ -116,7 +129,10 @@ sont définis manuellement à l'avance.
 Ici, l'agent génère à la volée du code pandas différent pour chaque question. Les
 invariants doivent donc **lire le code généré** (AST) pour déterminer quelles
 colonnes sont utilisées et quelle agrégation est appliquée — ce qui est impossible
-avec un pipeline de qualité statique. C'est le point de différenciation clé.
+avec un pipeline de qualité statique. C'est le point de différenciation clé, et c'est
+aussi là que se situe la contribution la plus originale (cf. l'invariant
+`unexplained_constant`, qui classe le rôle des constantes dans le code généré) —
+davantage que dans le SER/AURC, hérités de la prédiction sélective.
 
 ---
 
@@ -155,26 +171,31 @@ pour chaque invariant, mesure du taux de déclenchement sur données perturbées
 - **(a) σ_K** = variabilité run-à-run sur K=3 (indicative — 3 points). Avertissement :
   90 % des codes sont identiques entre les runs (modèle quasi-déterministe à T=0), σ
   reflète la variabilité résiduelle et non la vraie variance du modèle.
-- **(b) IC Wilson 95 %** = incertitude d'échantillonnage sur n questions (40–90 selon
-  le mode et le pooling). C'est le chiffre de robustesse statistique réelle.
+- **(b) IC Wilson 95 %** = incertitude d'échantillonnage sur n questions. **Caveat
+  d'indépendance** : avec le pooling K=3, n nominal = 90, mais comme les runs sont
+  quasi identiques (27/30 codes égaux), les observations ne sont pas indépendantes ;
+  le **n effectif est proche de 30** et les IC ci-dessous sont donc *optimistes*
+  (l'intervalle réel est plus large).
 
-#### Mode row_duplication — K=3 (n = 90 poolé)
+#### Mode row_duplication — K=3 (n = 90 poolé, n effectif ≈ 30)
 
 | Invariant | fire_pert | fire_clean | Δ (IC Wilson 95%) | Précision | Rappel | Abstient |
 |---|---|---|---|---|---|---|
-| `duplicate_rows` | 0.807 ± 0.030 | 0.000 ± 0.000 | **+0.807 [0.636, 0.890]** | 0.849 ± 0.031 | 0.867 | ✓ |
+| `duplicate_rows` | 0.807 ± 0.030 | **0.000 ± 0.000** | **+0.807 [0.636, 0.890]** | 0.849 ± 0.031 | 0.867 | ✓ |
 | `numeric_outliers` | 0.263 | 0.311 | -0.048 [-0.248, 0.166] | — | — | ✗ (trace) |
 | `dtype_mismatch` | 0.123 | 0.167 | -0.044 [-0.200, 0.133] | — | — | ✓ |
 | `unexplained_constant` | 0.000 | 0.000 | 0.000 [-0.049, 0.076] | — | — | ✓ |
 
 **Lecture** : `duplicate_rows` détecte la corruption avec un delta de +0.807, dont la
-borne inférieure Wilson est à 0.636 — même au pessimisme statistique, le signal est
-fort. `numeric_outliers` a un delta négatif (il fire légèrement PLUS sur données
-propres que perturbées) avec un IC couvrant zéro → aucun pouvoir discriminant.
+borne inférieure Wilson est à 0.636 (optimiste — n effectif ≈ 30) — même au pessimisme
+statistique, le signal est fort. Surtout, son **taux de déclenchement sur données
+propres est nul (0/30)** : il ne produit aucun faux positif. `numeric_outliers` a un
+delta négatif (il fire légèrement PLUS sur données propres que perturbées) avec un IC
+couvrant zéro → aucun pouvoir discriminant.
 
 ![Fig. 1 — Discrimination par invariant](figures/fig1_discrimination.png)
 
-#### Mode locale_format — K=3 (n = 90 poolé)
+#### Mode locale_format — K=3 (n = 90 poolé, n effectif ≈ 30)
 
 | Invariant | fire_pert | fire_clean | Δ (IC Wilson 95%) | Précision | Rappel | Abstient |
 |---|---|---|---|---|---|---|
@@ -183,10 +204,12 @@ propres que perturbées) avec un IC couvrant zéro → aucun pouvoir discriminan
 | `duplicate_rows` | 0.133 | 0.000 | +0.133 [0.027, 0.220] | 0.000 | 0.000 | ✓ |
 
 `dtype_mismatch` discrimine modérément (Δ = +0.233, IC [0.047, 0.401]). La borne
-inférieure à 0.047 signale que le résultat est marginal avec n = 90. La précision
-à 0.222 est faible : le dtype_mismatch fire aussi sur des colonnes non sensibles à la
-locale. Cas atypique : `duplicate_rows` fire sur données perturbées (0.133) mais pas
-sur données propres — certaines tables locale_format ont des doublons après conversion.
+inférieure à 0.047 signale que le résultat est **marginal, voire possiblement
+négligeable** avec n = 90 (et n effectif ≈ 30). La précision à 0.222 est faible : le
+`dtype_mismatch` fire aussi sur des colonnes object légitimes — c'est lui qui porte
+le FPR (cf. §6.2). Cas atypique : `duplicate_rows` fire sur données perturbées (0.133)
+mais pas sur données propres — certaines tables locale_format ont des doublons après
+conversion.
 
 #### Mode outlier_injection — K=2 (pas de σ, K insuffisant)
 
@@ -196,20 +219,23 @@ sur données propres — certaines tables locale_format ont des doublons après 
 | tous les autres | ≈ 0 | — | 0.000 | Non déclenchés |
 
 Aucun invariant ne couvre la classe outlier_injection. Le SER reste identique avec
-et sans invariants. C'est la limite assumée et documentée.
+et sans invariants. C'est la limite assumée et documentée — mais sur n_sensitive = 9
+seulement : il s'agit d'une absence de données autant que d'une frontière démontrée.
 
 ### 4.4 Réduction du SER par mode
 
-| Mode | SER_sans | SER_avec | IC Wilson SER_avec | Coverage | FPR clean |
-|---|---|---|---|---|---|
-| row_duplication | 50.0 % [39.9, 60.1] | **6.7 % [2.8, 14.1]** | — | 35.6 % [26.4, 45.9] | 16.7 % [10.3, 25.8] |
-| locale_format | 24.4 % [16.7, 34.3] | **12.2 % [6.8, 20.7]** | — | 56.7 % [46.4, 66.4] | 16.7 % [10.3, 25.8] |
-| outlier_injection | 18.3 % [10.4, 30.1] | **18.3 % [10.4, 30.1]** | — | 83.3 % [71.8, 90.9] | 16.7 % [9.1, 28.2] |
+| Mode | SER_sans | SER_avec | Coverage | FPR clean (global) |
+|---|---|---|---|---|
+| row_duplication | 50.0 % [39.9, 60.1] | **6.7 % [2.8, 14.1]** | **35.6 % [26.4, 45.9]** | 16.7 % [10.3, 25.8] |
+| locale_format | 24.4 % [16.7, 34.3] | **12.2 % [6.8, 20.7]** | 56.7 % [46.4, 66.4] | 16.7 % [10.3, 25.8] |
+| outlier_injection | 18.3 % [10.4, 30.1] | **18.3 % [10.4, 30.1]** | 83.3 % [71.8, 90.9] | 16.7 % [9.1, 28.2] |
 
 **Lecture** : pour `row_duplication`, le SER passe de 50 % à 6.7 % (réduction de
-87 %) mais au prix d'une couverture de seulement 35.6 % : l'agent répond à moins
-d'une question sur trois. Pour `outlier_injection`, les invariants sont inopérants
-(SER inchangé).
+87 %) **mais au prix d'une couverture de seulement 35.6 %** : l'agent répond à moins
+d'une question sur trois. Le SER bas est donc obtenu en grande partie *en ne
+répondant pas*. Or ce coût de couverture n'est pas dû à `duplicate_rows` (FPR nul,
+cf. §6.2) mais aux invariants faibles de la politique. Pour `outlier_injection`, les
+invariants sont inopérants (SER inchangé).
 
 ![Fig. 2 — SER avant/après invariants par mode](figures/fig2_ser_reduction.png)
 
@@ -219,18 +245,20 @@ Sur les K=3 runs `row_duplication` :
 
 | Métrique | Moyenne ± σ_K (a) | IC Wilson 95 % (b) |
 |---|---|---|
-| Δ discrimination `duplicate_rows` | **+0.807 ± 0.030** | **[0.636, 0.890]** |
-| FPR sur données propres | 0.167 ± 0.000 | [0.103, 0.258] |
+| Δ discrimination `duplicate_rows` | **+0.807 ± 0.030** | **[0.636, 0.890]** (optimiste, n eff. ≈ 30) |
+| FPR `duplicate_rows` sur clean | **0.000 ± 0.000** | [0.000, 0.114] |
+| FPR global (politique 3 invariants) | 0.167 ± 0.000 | [0.103, 0.258] |
 | SER avec invariants | 0.067 ± 0.000 | [0.028, 0.141] |
 | Coverage | 0.356 ± 0.019 | [0.264, 0.459] |
 
 **(a) σ_K = bruit du modèle** (run-à-run) : σ ≈ 0 confirme que le modèle est
 quasi-déterministe à T=0 (27/30 codes identiques entre les runs, distinctness check).
-Le σ est indicatif et ne peut être interprété comme un IC.
+Le σ est indicatif et ne peut être interprété comme un IC. Corollaire : le pooling K=3
+n'augmente quasiment pas l'information — le n effectif reste celui d'un run (~30).
 
-**(b) IC Wilson 95 %** = robustesse statistique sur l'échantillon de questions : c'est
-le chiffre phare. Le delta de 0.807 est robuste : même à la borne basse, le
-pouvoir discriminant est de 0.636.
+**(b) IC Wilson 95 %** = robustesse statistique sur l'échantillon de questions. Le
+delta de 0.807 reste fort même à la borne basse (0.636), mais cette borne est
+optimiste du fait de la non-indépendance des runs poolés.
 
 ![Fig. 3 — Stabilité K=3 : delta et FPR avec incertitudes](figures/fig3_stability_k3.png)
 
@@ -243,17 +271,21 @@ structurellement distincte de la variation naturelle des données.**
 
 Concrètement :
 - `duplicate_rows` est discriminant parce qu'un dup_fraction > 5 % est statistiquement
-  exceptionnel sur une table DataBench propre — il ne s'en produit pas par hasard.
-  La corruption `row_duplication` (30 %) dépasse très largement ce seuil.
+  exceptionnel sur une table DataBench propre — il ne s'en produit pas par hasard
+  (déclenchement clean : 0/30). La corruption `row_duplication` (30 %) dépasse très
+  largement ce seuil.
 - `numeric_outliers` est non discriminant parce que les données réelles (Kaggle) ont
   des distributions naturellement extrêmes (followers Twitter, revenus d'entreprise).
   Un outlier injecté est statistiquement indistinguable d'un outlier réel.
 - `dtype_mismatch` est modérément discriminant parce que la conversion locale change
-  le dtype, mais certaines tables ont déjà des colonnes mixtes (faux positifs).
+  le dtype, mais certaines tables ont déjà des colonnes object (faux positifs — c'est
+  l'origine du FPR global).
 
-Cette loi est la contribution méthodologique principale : elle fournit un critère
-a priori pour évaluer si un invariant candidat mérite d'être inclus dans la politique
-d'abstention.
+Corollaire de sélection : la qualité d'un invariant se lit à son **delta de
+déclenchement perturbé vs propre**, et un invariant dont le déclenchement sur données
+propres est non nul dégrade la couverture sans gain de détection proportionné. Cette
+loi fournit un critère a priori pour décider si un invariant candidat mérite d'entrer
+dans la politique d'abstention — c'est la contribution méthodologique principale.
 
 ---
 
@@ -265,29 +297,45 @@ Aucun invariant ne couvre la classe d'erreur où l'agent extrait une valeur plau
 d'une source grounded (table de référence correcte, code syntaxiquement juste) mais
 erronée pour la question posée. La perturbation `outlier_injection` en est un proxy :
 aucun invariant ne détecte les outliers injectés (Δ ≈ 0, IC couvrant zéro). Cette
-limite est confirmée empiriquement, pas seulement documentée par construction.
+limite est confirmée empiriquement — mais sur n_sensitive = 9, c'est aussi une
+absence de données.
 
-### 6.2 Taux de faux positifs non négligeable
+### 6.2 Faux positifs : origine réelle (correction)
 
-Le FPR sur données propres est de **16.7 % [10.3, 25.8]** pour tous les modes. Sur
-données `row_duplication` propres, l'invariant `duplicate_rows` se déclenche parce
-que certaines tables DataBench contiennent des doublons légitimes. Cela produit une
-**sur-abstention de 21.1 %** (l'agent refuse de répondre alors qu'il aurait eu
-raison). La couverture résultante (35.6 %) est faible pour une utilisation en
-production.
+Le FPR global sur données propres est de **16.7 % [10.3, 25.8]** pour tous les modes.
+Contrairement à ce qu'une lecture rapide suggérerait, il **ne provient pas de
+`duplicate_rows`** : sur le run propre `row_duplication`, `duplicate_rows` se déclenche
+**0 fois sur 30**, de même que `unexplained_constant`. Le FPR vient **entièrement de
+`dtype_mismatch`** (5/30), qui se déclenche sur des colonnes object légitimes des
+tables propres.
 
-### 6.3 K faible et quasi-déterminisme
+Conséquence directe et mesurée : une politique d'abstention pilotée par
+`duplicate_rows` seul donnerait, sur le mode `row_duplication`, un **FPR de 0 % et une
+couverture de 100 % sur données propres**, tout en conservant la détection de la
+corruption. La sur-abstention observée (couverture 35.6 %) est donc imputable aux
+invariants faibles, pas au bon invariant. **Le problème ouvert central n'est pas
+« détecter la corruption » (résolu pour row_duplication) mais « atteindre un SER bas à
+couverture acceptable »**, ce qui passe par une politique d'abstention sélective
+n'activant que les invariants à FPR nul.
 
-K=3 répétitions sur un modèle quasi-déterministe à T=0 (27/30 codes identiques)
-ne produit pas de σ fiable. Le σ ≈ 0 observé reflète la stabilité du modèle, pas
-une absence de variance intrinsèque. Pour mesurer la vraie variance : augmenter la
-température ou tester plusieurs modèles.
+### 6.3 K faible, quasi-déterminisme et n effectif
+
+K=3 répétitions sur un modèle quasi-déterministe à T=0 (27/30 codes identiques) ne
+produit pas de σ fiable, et surtout **n'augmente pas réellement la taille
+d'échantillon** : les 90 observations poolées équivalent à ~30 observations
+indépendantes. Les IC Wilson calculés sur n=90 sont donc optimistes ; les intervalles
+réels sont plus larges. Pour gagner en puissance statistique : augmenter le nombre de
+*questions* (pas le nombre de répétitions), et tester à température non nulle ou sur
+plusieurs modèles pour mesurer la vraie variance.
 
 ### 6.4 Petit échantillon et un seul modèle
 
 30 questions, un seul modèle (`claude-sonnet-4-6`), une seule valeur de severity
-(0.3). Les IC Wilson sont larges : la borne basse du delta locale_format est à 0.047
-— le résultat est statistiquement marginal. Toute généralisation requiert un
+(0.3). « VERIDATA mesure le SER » est donc à entendre strictement comme « mesure le
+SER de Sonnet sur ce sous-ensemble » : aucune généralisation à d'autres modèles n'est
+étayée — si `duplicate_rows` fonctionne en partie grâce à la façon dont Sonnet écrit
+le code, rien ne garantit la transférabilité. Les IC Wilson sont larges (borne basse
+du delta locale_format à 0.047 — résultat marginal). Toute généralisation requiert un
 échantillon plus large et plusieurs modèles.
 
 ---
@@ -296,12 +344,22 @@ température ou tester plusieurs modèles.
 
 ### Phase 1 — Consolidation
 
-- **K ≥ 10** sur l'ensemble des modes, température non nulle pour mesurer la vraie
-  variance du modèle.
 - **Échantillon élargi** : 100–200 questions, tous types (category, boolean,
-  list[number], list[category]).
+  list[number], list[category]) — priorité n°1, car c'est le n des *questions* qui
+  resserre les IC, pas les répétitions.
+- **Jeu de contrôle à doublons légitimes** : mesurer le FPR réel de `duplicate_rows`
+  là où il peut se déclencher à tort (logs, transactions récurrentes) — le 0 % actuel
+  n'est valide que sur des tables sans doublon naturel.
+- **Séparation agent / invariant** : marquer les questions où l'agent dédoublonne
+  spontanément (`nunique`, observé ~4/30) pour ne pas attribuer à l'invariant la
+  robustesse de l'agent.
+- **Politique d'abstention sélective** : n'activer que les invariants à FPR nul,
+  mesurer le couple SER / couverture qui en résulte.
+- **Classifieur de constantes** : perturbation dédiée (injection de coefficients dans
+  le code attendu) pour évaluer enfin la précision/rappel d'`unexplained_constant`.
 - **Multi-modèles** : GPT-4o, Gemini, modèles open-source pour tester la
   généralisation de la loi.
+- **K ≥ 10** à température non nulle pour mesurer la vraie variance du modèle.
 - **Publication** : article de méthode sur le critère de discriminabilité des
   invariants agnostiques.
 
@@ -341,9 +399,7 @@ python scripts/repeat_runs.py `
     runs\verified_clean_0.3_20260606T180645Z.jsonl
 
 # Générer les figures
-python scripts/make_figures.py \
-  --row-dup-perturbed  runs\verified_row_duplication_0.3_20260606T173652Z.jsonl ... \
-  --out report/figures
+python scripts/make_figures.py --out report/figures
 
 # Lancer K nouvelles répétitions (coûte des tokens)
 python scripts/repeat_runs.py --manifest runs/perturbed/<id>/manifest.jsonl --k 3
